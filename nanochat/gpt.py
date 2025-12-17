@@ -31,6 +31,8 @@ class GPTConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
+    use_headwise_attn_gate: bool = False
+    use_elementwise_attn_gate: bool = False
 
 
 def norm(x):
@@ -58,7 +60,15 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = self.n_embd // self.n_head
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
-        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
+        self.n_kv_group = self.n_head // self.n_kv_head
+        self.use_headwise_attn_gate = config.use_headwise_attn_gate
+        self.use_elementwise_attn_gate = config.use_elementwise_attn_gate
+        if self.use_headwise_attn_gate:
+            self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim + self.n_head, bias=False)
+        elif self.use_elementwise_attn_gate:
+            self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim * 2, bias=False)
+        else:
+            self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
@@ -67,7 +77,18 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
-        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
+        if self.use_headwise_attn_gate:
+            q = self.c_q(x).view(B, T, self.n_kv_head, -1)
+            q, g = torch.split(q, [self.head_dim * self.n_kv_group, self.n_kv_group], dim=-1)
+            g = g.reshape(B, T, -1, 1)
+            q = q.reshape(B, T, -1, self.head_dim)
+        elif self.use_elementwise_attn_gate:
+            q = self.c_q(x).view(B, T, self.n_kv_head, -1)
+            q, g = torch.split(q, [self.head_dim * self.n_kv_group, self.head_dim * self.n_kv_group], dim=-1)
+            g = g.reshape(B, T, -1, self.head_dim)
+            q = q.reshape(B, T, -1, self.head_dim)
+        else:
+            q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
 
@@ -104,7 +125,12 @@ class CausalSelfAttention(nn.Module):
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, enable_gqa=enable_gqa)
 
         # Re-assemble the heads side by side and project back to residual stream
-        y = y.transpose(1, 2).contiguous().view(B, T, -1)
+        y = y.transpose(1, 2).contiguous()
+
+        if self.use_headwise_attn_gate or self.use_elementwise_attn_gate:
+            y = y * torch.sigmoid(g)
+
+        y = y.view(B, T, -1)
         y = self.c_proj(y)
         return y
 
