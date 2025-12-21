@@ -207,7 +207,7 @@ while True:
 
     # save checkpoint at the end of the run (only on master process)
     if master_process and last_step and not dry_run:
-        output_dirname = f"d{depth}" # e.g. d12
+        output_dirname = model_tag if model_tag else f"d{depth}" # e.g. d12
         checkpoint_dir = os.path.join(base_dir, "mid_checkpoints", output_dirname)
         save_checkpoint(
             checkpoint_dir,
@@ -224,6 +224,8 @@ while True:
                     "n_head": model.config.n_head,
                     "n_kv_head": model.config.n_kv_head,
                     "n_embd": model.config.n_embd,
+                    "use_headwise_attn_gate" : model.config.use_headwise_attn_gate,
+                    "use_elementwise_attn_gate" : model.config.use_elementwise_attn_gate,
                 },
                 "user_config": user_config, # inputs to the training script
             }

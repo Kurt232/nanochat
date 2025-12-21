@@ -1,5 +1,6 @@
 #!/bin/bash
 
+set -e
 # This script is the "Best ChatGPT clone that $100 can buy",
 # It is designed to run in ~4 hours on 8XH100 node at $3/GPU/hour.
 
@@ -9,6 +10,19 @@
 # screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
 # 3) Example launch with wandb logging, but see below for setting up wandb first:
 # WANDB_RUN=speedrun screen -L -Logfile speedrun.log -S speedrun bash speedrun.sh
+
+if [ -z "$TAG" ]; then # d20 d20-headwise_gated d20-elementwise_gated
+    echo "TAG is not set. Exiting."
+    exit 1
+fi
+# d20-elementwise_gated is OOM on 4xA800
+USE_HEADWISE_ATTN_GATE=-1
+USE_ELEMENTWISE_ATTN_GATE=-1
+if [[ "$TAG" == *headwise_gated* ]]; then
+    USE_HEADWISE_ATTN_GATE=0
+elif [[ "$TAG" == *elementwise_gated* ]]; then
+    USE_ELEMENTWISE_ATTN_GATE=0
+fi
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
@@ -86,13 +100,11 @@ wait $DATASET_DOWNLOAD_PID
 NPROC_PER_NODE=8
 
 # pretrain the d20 model
-# torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN --use_headwise_attn_gate=0 --model_tag d20-headwise_gated
-# torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN --use_elementwise_attn_gate=0 --model_tag d20-elementwise_gated
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=20 --run=$WANDB_RUN --model_tag=$TAG --use_headwise_attn_gate=$USE_HEADWISE_ATTN_GATE --use_elementwise_attn_gate=$USE_ELEMENTWISE_ATTN_GATE
 # evaluate the model on a larger chunk of train/val data and draw some samples
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_loss -- --model_tag=$TAG
 # evaluate the model on CORE tasks
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval -- --model_tag=$TAG
 
 # -----------------------------------------------------------------------------
 # Midtraining (teach the model conversation special tokens, tool use, multiple choice)
@@ -102,15 +114,15 @@ torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # run midtraining and eval the model
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i mid
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.mid_train -- --run=$WANDB_RUN --model_tag=$TAG
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -i mid -g $TAG
 
 # -----------------------------------------------------------------------------
 # Supervised Finetuning (domain adaptation to each sequence all by itself per row)
 
 # train sft and re-eval right away (should see a small bump)
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --run=$WANDB_RUN --model_tag=$TAG
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -i sft -g $TAG
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"
