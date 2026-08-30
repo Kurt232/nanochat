@@ -11,8 +11,8 @@ the official checkpoint is about 0.6B largely because its tied embedding has
 - 4 Ray nodes with 8 GPUs each and the same CUDA/PyTorch environment.
 - The repository available to every worker (a Ray Job `--working-dir` is fine).
 - Node-local storage at `/opt/tiger/nanochat_runtime` (the default).
-- HDFS access through `/opt/tiger/nastk/bin/nastk`. Tokenizer and checkpoints
-  are durably synchronized to
+- HDFS CLI access through `/opt/tiger/yarn_deploy/hadoop/bin/hdfs`. Tokenizer
+  and checkpoints are durably synchronized to
   `hdfs://harunavaali/home/byte_search_aisearch_strategy/wenjiedu/nanochat`.
 
 Install the GPU environment and Ray Train on every node/image:
@@ -70,3 +70,27 @@ heads, 8 KV heads, and head dimension 128. With the 32K tied tokenizer it has
 steps. Checkpoints are written at steps 5K, 10K, 15K, 20K, and the final step;
 only the newest two are retained on node-local disks during training, and only
 the complete final checkpoint remains after successful HDFS compaction.
+
+## Scaling miniseries
+
+The scaling launcher adds three hard-coded Qwen3-family shapes below the 0.6B
+model and trains them sequentially on all 32 GPUs:
+
+```bash
+bash runs/qwen3_scaling_ray.sh
+```
+
+The 48M, 131M, and 285M points use approximately 50 training tokens per unique
+parameter. They retain the same 32K tokenizer, ClimbMix data, 4,096-token
+context, 2,097,152-token global batch, MuonAdamW optimizer, and learning-rate
+settings as the larger runs. Evaluation happens at the final step. These
+disposable measurement runs save only the final model and metadata, not
+optimizer state, to limit node-local and HDFS storage use.
+
+Measured results and the fitted curve are documented in
+[`dev/QWEN3_SCALING_REPORT.md`](../dev/QWEN3_SCALING_REPORT.md). Recreate the
+plot from the checked-in CSV with:
+
+```bash
+python dev/qwen3_scaling_analysis.py
+```

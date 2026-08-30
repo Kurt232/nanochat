@@ -17,6 +17,9 @@ from scripts.ray_prepare import fetch_tokenizer, load_shell_network_env, prepare
 
 def train_loop_per_worker(config):
     # TorchTrainer has already configured RANK/LOCAL_RANK/WORLD_SIZE and NCCL.
+    # Ray owns the process group lifecycle and will destroy it during backend
+    # shutdown. Avoid destroying it a second time in scripts.base_train.
+    os.environ["NANOCHAT_RAY_MANAGED_PROCESS_GROUP"] = "1"
     # Resolve network settings on the worker itself. In particular, do not put
     # proxy credentials in Ray's serialized runtime environment or its logs.
     os.environ.update(load_shell_network_env())

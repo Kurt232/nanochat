@@ -72,6 +72,27 @@ def test_qwen3_06b_topology():
             assert param.shape[0] % 32 == 0, f"{name} cannot be ZeRO-2 sharded over 32 ranks"
 
 
+@pytest.mark.parametrize(
+    "variant,expected",
+    [
+        ("qwen3-scale-48m", (8, 512, 1536, 8, 4, 48_245_248)),
+        ("qwen3-scale-131m", (12, 768, 2304, 12, 6, 131_356_416)),
+        ("qwen3-scale-285m", (16, 1024, 3072, 16, 8, 285_250_560)),
+    ],
+)
+def test_qwen3_scaling_topologies(variant, expected):
+    config = Qwen3Config.from_variant(variant)
+    layers, hidden, intermediate, heads, kv_heads, parameters = expected
+    assert config.num_hidden_layers == layers
+    assert config.hidden_size == hidden
+    assert config.intermediate_size == intermediate
+    assert config.num_attention_heads == heads
+    assert config.num_key_value_heads == kv_heads
+    with torch.device("meta"):
+        model = Qwen3(config)
+    assert sum(p.numel() for p in model.parameters()) == parameters
+
+
 def test_qwen3_1b_topology():
     config = Qwen3Config.from_variant("qwen3-1b")
     assert config.num_hidden_layers == 28

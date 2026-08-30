@@ -30,15 +30,26 @@ def _sync_checkpoint_files(checkpoint_dir, step, rank):
     base_dir = get_base_dir()
     relative_dir = os.path.relpath(checkpoint_dir, base_dir)
     remote_dir = f"{sync_root.rstrip('/')}/{relative_dir}"
-    nastk = os.environ.get("NANOCHAT_NASTK", "/opt/tiger/nastk/bin/nastk")
-    subprocess.run([nastk, "mkdir", "-p", remote_dir], check=True)
     filenames = [f"optim_{step:06d}_rank{rank:d}.pt"]
     if rank == 0:
         filenames.extend([f"model_{step:06d}.pt", f"meta_{step:06d}.json"])
-    for filename in filenames:
-        local_path = os.path.join(checkpoint_dir, filename)
-        if os.path.exists(local_path):
-            subprocess.run([nastk, "cp", "-s", local_path, f"{remote_dir}/{filename}"], check=True)
+    if sync_root.startswith("hdfs://"):
+        hdfs = os.environ.get("NANOCHAT_HDFS", "/opt/tiger/yarn_deploy/hadoop/bin/hdfs")
+        subprocess.run([hdfs, "dfs", "-mkdir", "-p", remote_dir], check=True)
+        for filename in filenames:
+            local_path = os.path.join(checkpoint_dir, filename)
+            if os.path.exists(local_path):
+                subprocess.run(
+                    [hdfs, "dfs", "-copyFromLocal", "-f", local_path, f"{remote_dir}/{filename}"],
+                    check=True,
+                )
+    else:
+        nastk = os.environ.get("NANOCHAT_NASTK", "/opt/tiger/nastk/bin/nastk")
+        subprocess.run([nastk, "mkdir", "-p", remote_dir], check=True)
+        for filename in filenames:
+            local_path = os.path.join(checkpoint_dir, filename)
+            if os.path.exists(local_path):
+                subprocess.run([nastk, "cp", "-s", local_path, f"{remote_dir}/{filename}"], check=True)
     logger.info(f"Synced rank {rank} checkpoint step {step} to {remote_dir}")
 
 def _patch_missing_config_keys(model_config_kwargs):

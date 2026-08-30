@@ -48,7 +48,20 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
 # Model architecture
-parser.add_argument("--model-architecture", type=str, default="nanochat", choices=["nanochat", "qwen3-0.6b", "qwen3-1b"], help="model topology; Qwen3 variants keep nanochat's tokenizer/training stack")
+parser.add_argument(
+    "--model-architecture",
+    type=str,
+    default="nanochat",
+    choices=[
+        "nanochat",
+        "qwen3-scale-48m",
+        "qwen3-scale-131m",
+        "qwen3-scale-285m",
+        "qwen3-0.6b",
+        "qwen3-1b",
+    ],
+    help="model topology; Qwen3 variants keep nanochat's tokenizer/training stack",
+)
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
@@ -79,6 +92,7 @@ parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="e
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 parser.add_argument("--keep-local-checkpoints", type=int, default=0, help="retain only the newest N checkpoints on each node (0 = retain all); pruning happens after durable sync")
+parser.add_argument("--no-save-optimizer", action="store_true", help="omit optimizer shards from checkpoints (useful for disposable scaling-law runs)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 args = parser.parse_args()
@@ -498,7 +512,7 @@ while True:
             checkpoint_dir,
             step,
             orig_model.state_dict(), # model parameters
-            optimizer.state_dict(), # optimizer state
+            None if args.no_save_optimizer else optimizer.state_dict(), # optimizer state
             { # metadata saved as json
                 "step": step,
                 "val_bpb": val_bpb, # loss at last step
@@ -621,4 +635,5 @@ if val_bpb is not None:
 
 # cleanup
 wandb_run.finish() # wandb run finish
-compute_cleanup()
+if os.environ.get("NANOCHAT_RAY_MANAGED_PROCESS_GROUP") != "1":
+    compute_cleanup()

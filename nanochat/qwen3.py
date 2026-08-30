@@ -57,6 +57,30 @@ class Qwen3Config:
     def from_variant(cls, variant, *, sequence_len=4096, vocab_size=32768):
         """Return one of the hard-coded Qwen3-family topologies used by nanochat."""
         variants = {
+            # Small Qwen3 miniseries points used for scaling-law measurements.
+            # They retain Qwen3's 128-dim QK-normalized heads and 2:1 GQA while
+            # scaling depth and width together, in the style of nanochat.
+            "qwen3-scale-48m": {
+                "hidden_size": 512,
+                "intermediate_size": 1536,
+                "num_hidden_layers": 8,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 4,
+            },
+            "qwen3-scale-131m": {
+                "hidden_size": 768,
+                "intermediate_size": 2304,
+                "num_hidden_layers": 12,
+                "num_attention_heads": 12,
+                "num_key_value_heads": 6,
+            },
+            "qwen3-scale-285m": {
+                "hidden_size": 1024,
+                "intermediate_size": 3072,
+                "num_hidden_layers": 16,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 8,
+            },
             "qwen3-0.6b": {},
             # A Qwen3-style ~1B model for nanochat's 32K tied vocabulary.
             # Keep the 0.6B/1.7B family's 28 layers, 16Q/8KV GQA and 128 head dim.
