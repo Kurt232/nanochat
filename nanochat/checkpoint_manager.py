@@ -5,10 +5,12 @@ import os
 import re
 import json
 import logging
+import subprocess
 import torch
 
 from nanochat.common import get_base_dir
 from nanochat.gpt import GPT, GPTConfig
+from nanochat.qwen3 import Qwen3, Qwen3Config
 from nanochat.tokenizer import get_tokenizer
 from nanochat.common import setup_default_logging
 
@@ -18,6 +20,26 @@ logger = logging.getLogger(__name__)
 def log0(message):
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(message)
+
+
+def _sync_checkpoint_files(checkpoint_dir, step, rank):
+    """Copy newly written local checkpoint files to optional HDFS/ByteNAS storage."""
+    sync_root = os.environ.get("NANOCHAT_CHECKPOINT_SYNC_URI")
+    if not sync_root:
+        return
+    base_dir = get_base_dir()
+    relative_dir = os.path.relpath(checkpoint_dir, base_dir)
+    remote_dir = f"{sync_root.rstrip('/')}/{relative_dir}"
+    nastk = os.environ.get("NANOCHAT_NASTK", "/opt/tiger/nastk/bin/nastk")
+    subprocess.run([nastk, "mkdir", "-p", remote_dir], check=True)
+    filenames = [f"optim_{step:06d}_rank{rank:d}.pt"]
+    if rank == 0:
+        filenames.extend([f"model_{step:06d}.pt", f"meta_{step:06d}.json"])
+    for filename in filenames:
+        local_path = os.path.join(checkpoint_dir, filename)
+        if os.path.exists(local_path):
+            subprocess.run([nastk, "cp", "-s", local_path, f"{remote_dir}/{filename}"], check=True)
+    logger.info(f"Synced rank {rank} checkpoint step {step} to {remote_dir}")
 
 def _patch_missing_config_keys(model_config_kwargs):
     """Add default values for new config keys missing in old checkpoints."""
@@ -38,7 +60,28 @@ def _patch_missing_keys(model_data, model_config):
         model_data["x0_lambdas"] = torch.zeros(n_layer)
         log0(f"Patching missing x0_lambdas in model data to 0.0")
 
-def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
+def _prune_local_checkpoints(checkpoint_dir, rank, keep):
+    """Keep only this rank's newest checkpoints after their durable sync completed."""
+    if keep <= 0:
+        return
+    pattern = re.compile(rf"optim_(\d+)_rank{rank}\.pt$")
+    steps = sorted(
+        int(match.group(1))
+        for filename in os.listdir(checkpoint_dir)
+        if (match := pattern.match(filename))
+    )
+    for old_step in steps[:-keep]:
+        owned_files = [f"optim_{old_step:06d}_rank{rank}.pt"]
+        if rank == 0:
+            owned_files.extend([f"model_{old_step:06d}.pt", f"meta_{old_step:06d}.json"])
+        for filename in owned_files:
+            path = os.path.join(checkpoint_dir, filename)
+            if os.path.isfile(path):
+                os.remove(path)
+        logger.info(f"Pruned local rank {rank} checkpoint step {old_step}")
+
+
+def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0, keep_local_checkpoints=0):
     if rank == 0:
         os.makedirs(checkpoint_dir, exist_ok=True)
         # Save the model state parameters
@@ -56,6 +99,8 @@ def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data,
         optimizer_path = os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
         torch.save(optimizer_data, optimizer_path)
         logger.info(f"Saved optimizer state to: {optimizer_path}")
+    _sync_checkpoint_files(checkpoint_dir, step, rank)
+    _prune_local_checkpoints(checkpoint_dir, rank, keep_local_checkpoints)
 
 def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
     # Load the model state
@@ -92,16 +137,27 @@ def build_model(checkpoint_dir, step, device, phase):
     # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
     model_config_kwargs = meta_data["model_config"]
-    _patch_missing_config_keys(model_config_kwargs)
-    log0(f"Building model with config: {model_config_kwargs}")
-    model_config = GPTConfig(**model_config_kwargs)
-    _patch_missing_keys(model_data, model_config)
-    with torch.device("meta"):
-        model = GPT(model_config)
+    architecture = model_config_kwargs.get("architecture", "nanochat")
+    if architecture == "qwen3":
+        log0(f"Building Qwen3 model with config: {model_config_kwargs}")
+        model_config = Qwen3Config(**model_config_kwargs)
+        with torch.device("meta"):
+            model = Qwen3(model_config)
+    else:
+        # architecture was not present in historical nanochat checkpoints.
+        model_config_kwargs.pop("architecture", None)
+        _patch_missing_config_keys(model_config_kwargs)
+        log0(f"Building nanochat model with config: {model_config_kwargs}")
+        model_config = GPTConfig(**model_config_kwargs)
+        _patch_missing_keys(model_data, model_config)
+        with torch.device("meta"):
+            model = GPT(model_config)
     # Load the model state
     model.to_empty(device=device)
     model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
     model.load_state_dict(model_data, strict=True, assign=True)
+    if hasattr(model, "tie_weights"):
+        model.tie_weights()
     # Put the model in the right training phase / mode
     if phase == "eval":
         model.eval()

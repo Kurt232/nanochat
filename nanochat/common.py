@@ -198,7 +198,10 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
     if is_ddp_requested and device_type == "cuda":
         device = torch.device("cuda", ddp_local_rank)
         torch.cuda.set_device(device)  # make "cuda" default to this device
-        dist.init_process_group(backend="nccl", device_id=device)
+        # Ray Train initializes the process group before invoking the worker loop;
+        # torchrun leaves initialization to us.
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
     else:
         device = torch.device(device_type) # mps|cpu

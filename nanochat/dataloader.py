@@ -16,6 +16,7 @@ Fallback to the original if you have very limited data AND long documents:
 https://github.com/karpathy/nanochat/blob/3c3a3d7/nanochat/dataloader.py#L78-L117
 """
 
+import os
 import torch
 import pyarrow.parquet as pq
 
@@ -31,6 +32,9 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     and epoch counts how many times we've cycled through the dataset (starts at 1).
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
+    node_local_data = os.environ.get("NANOCHAT_NODE_LOCAL_DATA") == "1"
+    shard_rank = int(os.environ.get("LOCAL_RANK", ddp_local_rank)) if node_local_data else ddp_rank
+    shard_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", ddp_world_size)) if node_local_data else ddp_world_size
 
     warn_on_legacy = ddp_rank == 0 and split == "train" # rank 0 on train split will warn on legacy
     parquet_paths = list_parquet_files(warn_on_legacy=warn_on_legacy)
@@ -51,21 +55,21 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
             pf = pq.ParquetFile(filepath)
             # Start from resume point if resuming on same file, otherwise from DDP rank
             if first_pass and (resume_rg_idx is not None) and (pq_idx == resume_pq_idx):
-                base_idx = resume_rg_idx // ddp_world_size
+                base_idx = resume_rg_idx // shard_world_size
                 base_idx += 1  # advance by 1 so we don't repeat data after resuming
-                rg_idx = base_idx * ddp_world_size + ddp_rank
+                rg_idx = base_idx * shard_world_size + shard_rank
                 if rg_idx >= pf.num_row_groups:
                     pq_idx += 1
                     continue
                 resume_rg_idx = None  # only do this once
             else:
-                rg_idx = ddp_rank
+                rg_idx = shard_rank
             while rg_idx < pf.num_row_groups:
                 rg = pf.read_row_group(rg_idx)
                 batch = rg.column('text').to_pylist()
                 for i in range(0, len(batch), tokenizer_batch_size):
                     yield batch[i:i+tokenizer_batch_size], (pq_idx, rg_idx, epoch)
-                rg_idx += ddp_world_size
+                rg_idx += shard_world_size
             pq_idx += 1
         first_pass = False
         epoch += 1
